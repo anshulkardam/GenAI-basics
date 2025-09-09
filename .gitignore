@@ -1,0 +1,8 @@
+.ropeproject
+.env
+.venv
+.vscode
+mambo.py
+venv
+__pycache__
+node_modules
