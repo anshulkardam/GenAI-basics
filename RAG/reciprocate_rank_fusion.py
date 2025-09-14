@@ -47,96 +47,6 @@ def inject_pdf(pdf_path, embeddings):
     print("PDF Injection Compelete!")
 
 
-def rewrite_query(client, user_query) -> List[str]:
-
-    SYSTEM_PROMPT = """
-    You are a helpful AI Assistant. 
-    Take the user query and rewrite it into 3 different questions. 
-    Return the output strictly as a JSON list of strings, nothing else.
-    """
-
-    res = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_query},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "rewrites_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "questions": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 3,
-                            "maxItems": 3,
-                        }
-                    },
-                    "required": ["questions"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-    )
-
-    raw_output = res.choices[0].message.content
-    rewrites = json.loads(raw_output)
-
-    user_query_list = rewrites.get("questions")
-    print(f"Original User Query: {user_query}")
-    print("Rewritten versions:")
-    for i, q in enumerate(user_query_list, start=1):
-        print(f"{i}. {q}")
-
-    return user_query_list
-
-
-def retrieve_unique_docs(embeddings, query_list):
-    print("Retrieving Relevant Unique Chunks..")
-    retriever = QdrantVectorStore.from_existing_collection(
-        url="http://localhost:6333",
-        collection_name="parallel_query",
-        embedding=embeddings,
-    )
-
-    all_query_pages = []  # list of sets, one per query
-    all_chunks = []  # store chunks across queries
-
-    for i, query in enumerate(query_list):
-        chunks = retriever.similarity_search(query=query)
-        pages = {doc.metadata.get("page") for doc in chunks}
-
-        all_query_pages.append(pages)
-        all_chunks.extend(chunks)  # flatten and store
-
-        print(f"\n--- Query {i}: {query} ---")
-        for doc in chunks:
-            print({f"pages for query {i} are": doc.metadata.get("page")})
-
-    # Find pages common across all queries
-    print("\nAll pages per query:", all_query_pages)
-    common_pages = set.intersection(*all_query_pages)
-    print("Common pages:", common_pages)
-
-    # Filter chunks to only those that match common pages
-    # unique_chunks = [
-    #     doc.page_content
-    #     for doc in all_chunks
-    #     if doc.metadata.get("page") in common_pages
-    # ]
-
-    unique_chunks = [
-        doc for doc in all_chunks if doc.metadata.get("page") in common_pages
-    ]
-
-    # print("Unique Chunks:", unique_chunks)
-
-    return unique_chunks
-
-
 def format_context(docs):
     context_blocks = []
     for i, doc in enumerate(docs, start=1):
@@ -201,6 +111,91 @@ def get_answers(relevant_chunks, user_query, client):
             break
 
 
+def rewrite_query(client, user_query) -> List[str]:
+
+    SYSTEM_PROMPT = """
+    You are a helpful AI Assistant. 
+    Take the user query and rewrite it into 3 different questions. 
+    Return the output strictly as a JSON list of strings, nothing else.
+    """
+
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_query},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "rewrites_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 3,
+                            "maxItems": 3,
+                        }
+                    },
+                    "required": ["questions"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    )
+
+    raw_output = res.choices[0].message.content
+    rewrites = json.loads(raw_output)
+
+    user_query_list = rewrites.get("questions")
+    print(f"Original User Query: {user_query}")
+    print("Rewritten versions:")
+    for i, q in enumerate(user_query_list, start=1):
+        print(f"{i}. {q}")
+
+    return user_query_list
+
+
+def retrieve_ranked_docs(embeddings, query_list):
+    print("Retrieving Relevant Chunks per Query..")
+    retriever = QdrantVectorStore.from_existing_collection(
+        url="http://localhost:6333",
+        collection_name="parallel_query",
+        embedding=embeddings,
+    )
+
+    rankings = []  # list of ranked doc_ids per query
+    doc_map = {}  # map doc_id -> document
+
+    for i, query in enumerate(query_list):
+        chunks = retriever.similarity_search(query=query, k=20)
+
+        ranking = []
+        for rank, doc in enumerate(chunks):
+            doc_id = f"{doc.metadata.get('page')}::{rank}"  # unique ID per doc
+            ranking.append(doc_id)
+            doc_map[doc_id] = doc
+
+        rankings.append(ranking)
+        print("rankinG=> ", ranking)
+        print(f"\n--- Query {i}: {query} ---")
+        for doc in chunks:
+            print({"page": doc.metadata.get("page")})
+
+    return rankings, doc_map
+
+
+def rank_fusion(rankings, k=60):
+    scores = {}
+    for ranking in rankings:
+        for rank, doc_id in enumerate(ranking):
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
 def main():
     client, embeddings = init_clients()
 
@@ -214,9 +209,21 @@ def main():
 
     query_list = rewrite_query(client, user_query)
 
-    unique_chunk_list = retrieve_unique_docs(embeddings, query_list)
+    # Step 1: get ranked results for each query
+    rankings, doc_map = retrieve_ranked_docs(embeddings, query_list)
 
-    get_answers(unique_chunk_list, user_query, client)
+    print("rankings=> ", rankings)
+
+    # Step 2: fuse the rankings
+    fused = rank_fusion(rankings, k=60)
+
+    print("fused=> ", fused)
+
+    # Step 3: pick top N fused docs
+    top_docs = [doc_map[doc_id] for doc_id, _ in fused[:3]]
+
+    # Now you can pass fused docs to your answer generator
+    get_answers(top_docs, user_query, client)
 
 
 if __name__ == "__main__":

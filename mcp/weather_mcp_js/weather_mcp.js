@@ -1,41 +1,28 @@
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import axios from 'axios';
 
-// Create an MCP server
 const server = new McpServer({
-  name: "demo-server",
-  version: "1.0.0"
+  name: 'My Server',
+  version: '1.0.0',
 });
 
-// Add an addition tool
-server.registerTool("add",
-  {
-    title: "Addition Tool",
-    description: "Add two numbers",
-    inputSchema: { a: z.number(), b: z.number() }
-  },
-  async ({ a, b }) => ({
-    content: [{ type: "text", text: String(a + b) }]
-  })
+server.tool('add', { a: z.number(), b: z.number() }, async function ({ a, b }) {
+  const sum = a + b;
+  return { content: [{ type: 'text', text: String(sum) }] };
+});
+
+server.tool(
+  'weather',
+  { city: z.string().describe('Name of the city') },
+  async function ({ city }) {
+    const response = await axios.get(`https://wttr.in/${city}?format=%C+%t`, {
+      responseType: 'json',
+    });
+    return { content: [{ type: 'text', text: JSON.stringify(response.data) }] };
+  }
 );
 
-// Add a dynamic greeting resource
-server.registerResource(
-  "greeting",
-  new ResourceTemplate("greeting://{name}", { list: undefined }),
-  { 
-    title: "Greeting Resource",      // Display name for UI
-    description: "Dynamic greeting generator"
-  },
-  async (uri, { name }) => ({
-    contents: [{
-      uri: uri.href,
-      text: `Hello, ${name}!`
-    }]
-  })
-);
-
-// Start receiving messages on stdin and sending messages on stdout
 const transport = new StdioServerTransport();
 await server.connect(transport);

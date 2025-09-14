@@ -47,12 +47,13 @@ def inject_pdf(pdf_path, embeddings):
     print("PDF Injection Compelete!")
 
 
-def rewrite_query(client, user_query) -> List[str]:
+def llm(client, user_query):
 
     SYSTEM_PROMPT = """
-    You are a helpful AI Assistant. 
-    Take the user query and rewrite it into 3 different questions. 
-    Return the output strictly as a JSON list of strings, nothing else.
+    You are a helpful assistant. 
+    Generate a concise passage (2–3 sentences) that could hypothetically answer the user query, 
+    as if it came from a textbook or reference guide. 
+    Do not say 'I don’t know'. Just generate the most plausible answer passage.
     """
 
     res = client.chat.completions.create(
@@ -61,40 +62,40 @@ def rewrite_query(client, user_query) -> List[str]:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_query},
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "rewrites_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "questions": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 3,
-                            "maxItems": 3,
-                        }
-                    },
-                    "required": ["questions"],
-                    "additionalProperties": False,
-                },
-            },
-        },
     )
 
-    raw_output = res.choices[0].message.content
-    rewrites = json.loads(raw_output)
+    answer = res.choices[0].message.content
 
-    user_query_list = rewrites.get("questions")
+    print(f"Query: {user_query}")
+    print("Answer: ", answer)
+
+    return answer
+
+
+def rewrite_query(client, user_query):
+
+    SYSTEM_PROMPT = """
+    You are a helpful AI Assistant. 
+    Take the user query and rewrite it
+    """
+
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_query},
+        ],
+    )
+
+    rewrites = res.choices[0].message.content
+
     print(f"Original User Query: {user_query}")
-    print("Rewritten versions:")
-    for i, q in enumerate(user_query_list, start=1):
-        print(f"{i}. {q}")
+    print("Rewritten: ", rewrites)
 
-    return user_query_list
+    return rewrites
 
 
-def retrieve_unique_docs(embeddings, query_list):
+def retrieve_unique_docs(embeddings, query):
     print("Retrieving Relevant Unique Chunks..")
     retriever = QdrantVectorStore.from_existing_collection(
         url="http://localhost:6333",
@@ -102,39 +103,12 @@ def retrieve_unique_docs(embeddings, query_list):
         embedding=embeddings,
     )
 
-    all_query_pages = []  # list of sets, one per query
-    all_chunks = []  # store chunks across queries
+    chunks = retriever.similarity_search(query=query)
+    pages = {doc.metadata.get("page") for doc in chunks}
 
-    for i, query in enumerate(query_list):
-        chunks = retriever.similarity_search(query=query)
-        pages = {doc.metadata.get("page") for doc in chunks}
+    print("pages found", pages)
 
-        all_query_pages.append(pages)
-        all_chunks.extend(chunks)  # flatten and store
-
-        print(f"\n--- Query {i}: {query} ---")
-        for doc in chunks:
-            print({f"pages for query {i} are": doc.metadata.get("page")})
-
-    # Find pages common across all queries
-    print("\nAll pages per query:", all_query_pages)
-    common_pages = set.intersection(*all_query_pages)
-    print("Common pages:", common_pages)
-
-    # Filter chunks to only those that match common pages
-    # unique_chunks = [
-    #     doc.page_content
-    #     for doc in all_chunks
-    #     if doc.metadata.get("page") in common_pages
-    # ]
-
-    unique_chunks = [
-        doc for doc in all_chunks if doc.metadata.get("page") in common_pages
-    ]
-
-    # print("Unique Chunks:", unique_chunks)
-
-    return unique_chunks
+    return chunks
 
 
 def format_context(docs):
@@ -150,7 +124,7 @@ def get_answers(relevant_chunks, user_query, client):
 
     context = format_context(relevant_chunks)
 
-    # print("context given to context", context)
+    print("context given to context", context)
 
     SYSTEM_PROMPT = f"""
     You are an expert AI assistant. Base all answers only on the provided Context.
@@ -212,11 +186,13 @@ def main():
 
     trick_question = "how good are movies?"
 
-    query_list = rewrite_query(client, user_query)
+    query_translation = rewrite_query(client, trick_question)
 
-    unique_chunk_list = retrieve_unique_docs(embeddings, query_list)
+    llm_answer = llm(client, query_translation)
 
-    get_answers(unique_chunk_list, user_query, client)
+    unique_chunk_list = retrieve_unique_docs(embeddings, llm_answer)
+
+    get_answers(unique_chunk_list, trick_question, client)
 
 
 if __name__ == "__main__":

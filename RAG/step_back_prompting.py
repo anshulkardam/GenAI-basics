@@ -48,17 +48,27 @@ def inject_pdf(pdf_path, embeddings):
 
 
 def rewrite_query(client, user_query) -> List[str]:
-
-    SYSTEM_PROMPT = """
+    STEP_BACK_SYSTEM_PROMPT = """
     You are a helpful AI Assistant. 
-    Take the user query and rewrite it into 3 different questions. 
-    Return the output strictly as a JSON list of strings, nothing else.
+    Your task is to first create a "step-back" abstraction of the user’s query,
+    i.e., a higher-level reformulation that captures its core intent 
+    without the surface details.
+
+    Then, based on that abstraction, generate 3 different rewritten versions 
+    of the original query. 
+    Each rewrite should be natural, distinct, and faithful to the meaning.
+
+    Return the output strictly in JSON with this format:
+    {
+        "step_back": "<abstraction of query>",
+        "questions": ["...", "...", "..."]
+    }
     """
 
     res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": STEP_BACK_SYSTEM_PROMPT},
             {"role": "user", "content": user_query},
         ],
         response_format={
@@ -68,14 +78,15 @@ def rewrite_query(client, user_query) -> List[str]:
                 "schema": {
                     "type": "object",
                     "properties": {
+                        "step_back": {"type": "string"},
                         "questions": {
                             "type": "array",
                             "items": {"type": "string"},
                             "minItems": 3,
                             "maxItems": 3,
-                        }
+                        },
                     },
-                    "required": ["questions"],
+                    "required": ["step_back", "questions"],
                     "additionalProperties": False,
                 },
             },
@@ -85,8 +96,11 @@ def rewrite_query(client, user_query) -> List[str]:
     raw_output = res.choices[0].message.content
     rewrites = json.loads(raw_output)
 
+    step_back = rewrites.get("step_back")
     user_query_list = rewrites.get("questions")
+
     print(f"Original User Query: {user_query}")
+    print(f"Step-back abstraction: {step_back}")
     print("Rewritten versions:")
     for i, q in enumerate(user_query_list, start=1):
         print(f"{i}. {q}")
@@ -212,11 +226,11 @@ def main():
 
     trick_question = "how good are movies?"
 
-    query_list = rewrite_query(client, user_query)
+    query_list = rewrite_query(client, trick_question)
 
     unique_chunk_list = retrieve_unique_docs(embeddings, query_list)
 
-    get_answers(unique_chunk_list, user_query, client)
+    get_answers(unique_chunk_list, trick_question, client)
 
 
 if __name__ == "__main__":

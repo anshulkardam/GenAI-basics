@@ -47,12 +47,12 @@ def inject_pdf(pdf_path, embeddings):
     print("PDF Injection Compelete!")
 
 
-def rewrite_query(client, user_query) -> List[str]:
-
+def decompose_query(client, user_query) -> List[str]:
     SYSTEM_PROMPT = """
-    You are a helpful AI Assistant. 
-    Take the user query and rewrite it into 3 different questions. 
-    Return the output strictly as a JSON list of strings, nothing else.
+    You are a query decomposition assistant.
+    Break down the user query into the smallest, independent sub-questions 
+    that together can fully answer the query.
+    Return as a JSON array of strings.
     """
 
     res = client.chat.completions.create(
@@ -94,47 +94,93 @@ def rewrite_query(client, user_query) -> List[str]:
     return user_query_list
 
 
-def retrieve_unique_docs(embeddings, query_list):
-    print("Retrieving Relevant Unique Chunks..")
+def retrieve_and_merge(embeddings, query_list):
     retriever = QdrantVectorStore.from_existing_collection(
         url="http://localhost:6333",
         collection_name="parallel_query",
         embedding=embeddings,
     )
 
-    all_query_pages = []  # list of sets, one per query
-    all_chunks = []  # store chunks across queries
-
+    all_chunks = []
     for i, query in enumerate(query_list):
-        chunks = retriever.similarity_search(query=query)
-        pages = {doc.metadata.get("page") for doc in chunks}
+        chunks = retriever.similarity_search(query=query, k=5)
+        all_chunks.extend(chunks)
 
-        all_query_pages.append(pages)
-        all_chunks.extend(chunks)  # flatten and store
-
-        print(f"\n--- Query {i}: {query} ---")
+        print(f"\n--- Retrieval for sub-query {i+1}: {query} ---")
         for doc in chunks:
-            print({f"pages for query {i} are": doc.metadata.get("page")})
+            print({f"page": doc.metadata.get("page")})
 
-    # Find pages common across all queries
-    print("\nAll pages per query:", all_query_pages)
-    common_pages = set.intersection(*all_query_pages)
-    print("Common pages:", common_pages)
+    return all_chunks
 
-    # Filter chunks to only those that match common pages
-    # unique_chunks = [
-    #     doc.page_content
-    #     for doc in all_chunks
-    #     if doc.metadata.get("page") in common_pages
-    # ]
 
-    unique_chunks = [
-        doc for doc in all_chunks if doc.metadata.get("page") in common_pages
-    ]
+def run_strategy_A(client, embeddings, user_query):
+    print("\n=== Strategy A: Retrieve separately, merge later ===")
+    query_list = decompose_query(client, user_query)
+    merged_chunks = retrieve_and_merge(embeddings, query_list)
+    get_answers(merged_chunks, user_query, client)
 
-    # print("Unique Chunks:", unique_chunks)
 
-    return unique_chunks
+def run_strategy_B(client, embeddings, user_query):
+    print("\n=== Strategy B: Sequential answering ===")
+    query_list = decompose_query(client, user_query)
+
+    retriever = QdrantVectorStore.from_existing_collection(
+        url="http://localhost:6333",
+        collection_name="parallel_query",
+        embedding=embeddings,
+    )
+
+    sub_answers = []
+    for i, query in enumerate(query_list):
+        chunks = retriever.similarity_search(query=query, k=5)
+        context = format_context(chunks)
+
+        SYSTEM_PROMPT = f"""
+        You are an expert assistant. Answer only using the provided Context.
+
+        Return strictly JSON:
+        {{
+          "sub_query": "{query}",
+          "answer": "short answer from context or 'I don’t know'",
+          "sources": ["doc_x references if any"]
+        }}
+
+        Context: {context}
+        """
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}],
+            temperature=0,
+        )
+
+        try:
+            parsed = json.loads(resp.choices[0].message.content)
+        except json.JSONDecodeError:
+            parsed = {"sub_query": query, "answer": "Invalid JSON", "sources": []}
+
+        sub_answers.append(parsed)
+
+    # merge all sub-answers into a final synthesis
+    final_prompt = f"""
+    Synthesize a final user-facing answer from the following sub-answers:
+
+    {json.dumps(sub_answers, indent=2)}
+
+    Return strictly JSON:
+    {{
+      "final_answer": "clear, concise synthesis in <=200 words"
+    }}
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": final_prompt}],
+        temperature=0,
+    )
+
+    final = json.loads(resp.choices[0].message.content)
+    print("✅ Final synthesized answer:", final["final_answer"])
 
 
 def format_context(docs):
@@ -212,11 +258,11 @@ def main():
 
     trick_question = "how good are movies?"
 
-    query_list = rewrite_query(client, user_query)
+    # Strategy A
+    run_strategy_A(client, embeddings, user_query)
 
-    unique_chunk_list = retrieve_unique_docs(embeddings, query_list)
-
-    get_answers(unique_chunk_list, user_query, client)
+    # Strategy B
+    run_strategy_B(client, embeddings, user_query)
 
 
 if __name__ == "__main__":
